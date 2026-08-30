@@ -495,7 +495,7 @@ static void print_resource(std::ostream &os,
                            const ShaderCreateInfo::Resource &res,
                            const ShaderCreateInfo &info)
 {
-  {
+  if (GLContext::explicit_location_support) {
     os << "layout(binding = " << res.slot;
     if (res.bind_type == ShaderCreateInfo::Resource::BindType::IMAGE) {
       os << ", " << to_string(res.image.format);
@@ -507,6 +507,16 @@ static void print_resource(std::ostream &os,
       os << ", std430";
     }
     os << ") ";
+  }
+  else {
+    /* Legacy OpenGL 3.3: slots are assigned after linking by #GLShaderInterface. Only the memory
+     * layout has to be declared here, as it cannot be changed afterwards. */
+    if (res.bind_type == ShaderCreateInfo::Resource::BindType::UNIFORM_BUFFER) {
+      os << "layout(std140) ";
+    }
+    else if (res.bind_type == ShaderCreateInfo::Resource::BindType::STORAGE_BUFFER) {
+      os << "layout(std430) ";
+    }
   }
 
   switch (res.bind_type) {
@@ -631,7 +641,7 @@ std::string GLShader::resources_declare(const ShaderCreateInfo &info) const
   int location = 0;
   for (const ShaderCreateInfo::PushConst &uniform : info.push_constants_) {
     /* See #131227: Work around legacy Intel bug when using layout locations. */
-    if (!info.specialization_constants_.is_empty()) {
+    if (!info.specialization_constants_.is_empty() && GLContext::explicit_location_support) {
       ss << "layout(location = " << location << ") ";
       location += std::max(1, uniform.array_size);
     }
@@ -730,7 +740,9 @@ std::string GLShader::vertex_interface_declare(const ShaderCreateInfo &info) con
       ss << "#define gpu_ViewportIndex gl_ViewportIndex\n";
     }
   }
-  if (flag_is_set(info.builtins_combined(), BuiltinBits::CLIP_CONTROL)) {
+  if (flag_is_set(info.builtins_combined(), BuiltinBits::CLIP_CONTROL) &&
+      GLContext::clip_control_support)
+  {
     if (!has_geometry_stage) {
       /* Assume clip range is set to 0..1 and remap the range just like Vulkan and Metal.
        * If geometry stage is needed, do that remapping inside the geometry shader stage. */
@@ -1009,7 +1021,9 @@ std::string GLShader::workaround_geometry_shader_source_create(
       ss << " vec3(" << int(i == 0) << ", " << int(i == 1) << ", " << int(i == 2) << ");\n";
     }
     ss << "  gl_Position = gl_in[" << i << "].gl_Position;\n";
-    if (flag_is_set(info.builtins_combined(), BuiltinBits::CLIP_CONTROL)) {
+    if (flag_is_set(info.builtins_combined(), BuiltinBits::CLIP_CONTROL) &&
+        GLContext::clip_control_support)
+    {
       /* Assume clip range is set to 0..1 and remap the range just like Vulkan and Metal. */
       ss << "gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;\n";
     }
@@ -1052,21 +1066,70 @@ bool GLShader::do_geometry_shader_injection(const shader::ShaderCreateInfo *info
 /** \name Shader stage creation
  * \{ */
 
+/**
+ * Emit the `#version` directive and, on the legacy OpenGL 3.3 code-path, the extensions that
+ * bring GLSL 3.30 up to what the generated sources expect.
+ *
+ * Shaders are patched once and cached, so this only reflects the context Blender started with.
+ */
+static void glsl_patch_version_and_extensions(std::stringstream &ss)
+{
+  if (epoxy_gl_version() >= 43) {
+    ss << "#version 430\n";
+    return;
+  }
+
+  ss << "#version 330\n";
+  if (GLContext::explicit_location_support) {
+    /* `layout(location = ...)` on uniforms, and `layout(binding = ...)` on samplers, images and
+     * interface blocks. Bindings are re-assigned after linking by #GLShaderInterface either way,
+     * so declaring them is only about keeping the sources identical across both code-paths. */
+    ss << "#extension GL_ARB_explicit_uniform_location : enable\n";
+    ss << "#extension GL_ARB_shading_language_420pack : enable\n";
+  }
+  if (GLContext::texture_gather_support) {
+    /* Some drivers disagree with `epoxy_has_gl_extension` about the actual shader support, so
+     * double check the preprocessor define (see #56544). */
+    ss << "#extension GL_ARB_texture_gather : enable\n";
+    ss << "#ifdef GL_ARB_texture_gather\n";
+    ss << "#  define GPU_ARB_texture_gather\n";
+    ss << "#endif\n";
+  }
+  if (GLContext::texture_cube_map_array_support) {
+    ss << "#extension GL_ARB_texture_cube_map_array : enable\n";
+    ss << "#define GPU_ARB_texture_cube_map_array\n";
+  }
+  if (GLContext::geometry_shader_invocations_support) {
+    ss << "#extension GL_ARB_gpu_shader5 : enable\n";
+    ss << "#define GPU_ARB_gpu_shader5\n";
+  }
+  if (GCaps.shader_image_load_store_support) {
+    ss << "#extension GL_ARB_shader_image_load_store : enable\n";
+  }
+  if (GCaps.shader_storage_buffer_objects_support) {
+    ss << "#extension GL_ARB_shader_storage_buffer_object : enable\n";
+  }
+  if (epoxy_has_gl_extension("GL_ARB_conservative_depth")) {
+    ss << "#extension GL_ARB_conservative_depth : enable\n";
+  }
+}
+
 static StringRefNull glsl_patch_vertex_get()
 {
   /** Used for shader patching. Init once. */
   static std::string patch = []() {
     std::stringstream ss;
     /* Version need to go first. */
-    ss << "#version 430\n";
+    glsl_patch_version_and_extensions(ss);
 
     /* Enable extensions for features that are not part of our base GLSL version
      * don't use an extension for something already available! */
-    {
-      /* Required extension. */
+    if (GCaps.shader_draw_parameters_support) {
       ss << "#extension GL_ARB_shader_draw_parameters : enable\n";
       ss << "#define GPU_ARB_shader_draw_parameters\n";
       ss << "#define gpu_BaseInstance gl_BaseInstanceARB\n";
+    }
+    if (GLContext::clip_control_support) {
       ss << "#define GPU_ARB_clip_control\n";
     }
     if (GLContext::layered_rendering_support) {
@@ -1080,6 +1143,13 @@ static StringRefNull glsl_patch_vertex_get()
     }
     if (GLContext::native_barycentric_support) {
       ss << "#extension GL_AMD_shader_explicit_vertex_parameter: enable\n";
+    }
+
+    /* Fallbacks. Must come after every `#extension` directive, which GLSL requires to precede
+     * any declaration. */
+    if (!GCaps.shader_draw_parameters_support) {
+      /* Legacy code-path: #GLBatch::draw uploads the base instance as a uniform. */
+      ss << "uniform int gpu_BaseInstance;\n";
     }
 
     /* Vulkan GLSL compatibility. */
@@ -1105,12 +1175,14 @@ static StringRefNull glsl_patch_geometry_get()
   static std::string patch = []() {
     std::stringstream ss;
     /* Version need to go first. */
-    ss << "#version 430\n";
+    glsl_patch_version_and_extensions(ss);
 
     if (GLContext::native_barycentric_support) {
       ss << "#extension GL_AMD_shader_explicit_vertex_parameter: enable\n";
     }
-    ss << "#define GPU_ARB_clip_control\n";
+    if (GLContext::clip_control_support) {
+      ss << "#define GPU_ARB_clip_control\n";
+    }
 
     /* Array compatibility. */
     ss << "#define gpu_Array(_type) _type[]\n";
@@ -1132,7 +1204,7 @@ static StringRefNull glsl_patch_fragment_get()
   static std::string patch = []() {
     std::stringstream ss;
     /* Version need to go first. */
-    ss << "#version 430\n";
+    glsl_patch_version_and_extensions(ss);
 
     if (GLContext::native_barycentric_support) {
       ss << "#extension GL_AMD_shader_explicit_vertex_parameter: enable\n";
@@ -1148,7 +1220,9 @@ static StringRefNull glsl_patch_fragment_get()
       ss << "#extension GL_ARB_shader_stencil_export: enable\n";
       ss << "#define GPU_ARB_shader_stencil_export\n";
     }
-    ss << "#define GPU_ARB_clip_control\n";
+    if (GLContext::clip_control_support) {
+      ss << "#define GPU_ARB_clip_control\n";
+    }
 
     /* Array compatibility. */
     ss << "#define gpu_Array(_type) _type[]\n";
@@ -1169,7 +1243,8 @@ static StringRefNull glsl_patch_compute_get()
   /** Used for shader patching. Init once. */
   static std::string patch = []() {
     std::stringstream ss;
-    /* Version need to go first. */
+    /* Version need to go first. Compute shaders are core in 4.3 and are never compiled on the
+     * legacy code-path, so this one does not have a GLSL 3.30 variant. */
     ss << "#version 430\n";
 
     /* Array compatibility. */
@@ -1178,7 +1253,9 @@ static StringRefNull glsl_patch_compute_get()
     /* Needs to have this defined upfront for configuring shader defines. */
     ss << "#define GPU_COMPUTE_SHADER\n";
 
-    ss << "#define GPU_ARB_clip_control\n";
+    if (GLContext::clip_control_support) {
+      ss << "#define GPU_ARB_clip_control\n";
+    }
 
     shader::GeneratedSource extensions{"gpu_shader_glsl_extension.glsl", {}, ss.str()};
     shader::GeneratedSourceList sources{extensions};

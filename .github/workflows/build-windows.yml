@@ -1,0 +1,153 @@
+# Manually triggered Windows build, following the developer handbook:
+#   https://developer.blender.org/docs/handbook/building_blender/windows/
+#   https://developer.blender.org/docs/handbook/development_environments/visual_studio/
+#
+# The runner image already provides everything the handbook asks you to install by hand
+# (Visual Studio 2022 with the "Desktop development with C++" workload, CMake and Git), so the
+# only extra work is checking out the precompiled libraries submodule before handing over to
+# `make.bat`, which detects Visual Studio and drives CMake itself.
+name: Build Blender (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "make.bat convenience target"
+        type: choice
+        options: [lite, full, release, headless]
+        default: lite
+      build_type:
+        description: "Configuration to build"
+        type: choice
+        options: [Release, Debug]
+        default: Release
+      generator:
+        description: "Build system. Ninja uses every core; MSBuild also leaves a Blender.sln behind."
+        type: choice
+        options: [ninja, msbuild]
+        default: ninja
+      visual_studio:
+        description: "Visual Studio version. 'auto' lets make.bat pick the newest one installed."
+        type: choice
+        options: [auto, "2022"]
+        default: auto
+      with_tests:
+        description: "Also build the unit tests (WITH_GTESTS)"
+        type: boolean
+        default: false
+      upload_artifact:
+        description: "Upload the installed build as a workflow artifact"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ inputs.target }} / ${{ inputs.build_type }} / ${{ inputs.generator }}
+    runs-on: windows-2022
+    # A cold `full` build with no compiler cache is measured in hours on a hosted runner.
+    timeout-minutes: 360
+
+    env:
+      # Keep the build off the workspace drive, which is the smaller of the two.
+      BUILD_DIR: C:\blender-build
+      LIB_DIR: lib/windows_x64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          # The precompiled libraries are fetched separately below, so that Git LFS can be
+          # pointed at just that submodule.
+          submodules: false
+          lfs: false
+
+      - name: Show environment
+        shell: pwsh
+        run: |
+          cmake --version
+          git --version
+          git lfs version
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name, @{n = 'FreeGB'; e = { [math]::Round($_.Free / 1GB, 1) } },
+                                @{n = 'UsedGB'; e = { [math]::Round($_.Used / 1GB, 1) } } |
+            Format-Table
+
+      - name: Install Ninja
+        if: ${{ inputs.generator == 'ninja' }}
+        shell: pwsh
+        run: |
+          if (Get-Command ninja -ErrorAction SilentlyContinue) {
+            ninja --version
+            return
+          }
+          choco install ninja -y --no-progress
+
+      # Mirrors build_files/windows/check_libraries.cmd, which would otherwise stop and ask
+      # whether to download the libraries. Skipping the LFS smudge filter during the submodule
+      # checkout and pulling afterwards keeps the working tree from being written twice.
+      - name: Check out precompiled libraries
+        shell: cmd
+        run: |
+          git config --local "submodule.%LIB_DIR%.update" checkout
+          set GIT_LFS_SKIP_SMUDGE=1
+          git submodule update --init --progress -- "%LIB_DIR%"
+          if errorlevel 1 exit /b 1
+          set GIT_LFS_SKIP_SMUDGE=
+          git -C "%LIB_DIR%" lfs pull
+          if errorlevel 1 exit /b 1
+
+      - name: Compose make.bat arguments
+        shell: pwsh
+        run: |
+          $makeArgs = @('${{ inputs.target }}')
+          if ('${{ inputs.build_type }}' -eq 'Debug') { $makeArgs += 'debug' }
+          if ('${{ inputs.generator }}' -eq 'ninja') { $makeArgs += 'ninja' }
+          if ('${{ inputs.visual_studio }}' -ne 'auto') { $makeArgs += '${{ inputs.visual_studio }}' }
+          if ('${{ inputs.with_tests }}' -eq 'true') { $makeArgs += 'with_tests' }
+          $makeArgs += @('builddir', $env:BUILD_DIR)
+          "MAKE_ARGS=$($makeArgs -join ' ')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build Blender
+        shell: cmd
+        run: |
+          echo make.bat %MAKE_ARGS%
+          call make.bat %MAKE_ARGS%
+          if errorlevel 1 exit /b 1
+
+      # Ninja is single-config and installs to <build>\bin, MSBuild installs to
+      # <build>\bin\<Config>, so locate the executable rather than assuming either.
+      - name: Locate the installed build
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path $env:BUILD_DIR -Filter blender.exe -Recurse -File -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -like '*\bin\*' } |
+                 Select-Object -First 1
+          if (-not $exe) { throw "blender.exe was not found under $env:BUILD_DIR" }
+          "INSTALL_DIR=$($exe.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & $exe.FullName --version
+
+      - name: Upload build
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-windows-x64-${{ inputs.target }}-${{ inputs.build_type }}
+          path: ${{ env.INSTALL_DIR }}
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ inputs.target }}-${{ inputs.build_type }}
+          path: |
+            ${{ env.BUILD_DIR }}\Build.log
+            ${{ env.BUILD_DIR }}\CMakeCache.txt
+            ${{ env.BUILD_DIR }}\CMakeFiles\CMakeError.log
+            ${{ env.BUILD_DIR }}\CMakeFiles\CMakeOutput.log
+          if-no-files-found: ignore
+          retention-days: 7

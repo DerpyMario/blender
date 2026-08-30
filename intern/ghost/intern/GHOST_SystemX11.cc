@@ -429,15 +429,15 @@ GHOST_IContext *GHOST_SystemX11::createOffscreenContext(GHOST_GPUSettings gpu_se
 
 #ifdef WITH_OPENGL_BACKEND
     case GHOST_kDrawingContextTypeOpenGL: {
-      for (int minor = 6; minor >= 3; --minor) {
+      for (const GHOST_GLVersion &version : GHOST_OPENGL_VERSIONS) {
         GHOST_Context *context = new GHOST_ContextGLX(
             context_params_offscreen,
             (Window) nullptr,
             display_,
             (GLXFBConfig) nullptr,
             GLX_CONTEXT_CORE_PROFILE_BIT_ARB,
-            4,
-            minor,
+            version.major,
+            version.minor,
             GHOST_OPENGL_GLX_CONTEXT_FLAGS |
                 (context_params_offscreen.is_debug ? GLX_CONTEXT_DEBUG_BIT_ARB : 0),
             GHOST_OPENGL_GLX_RESET_NOTIFICATION_STRATEGY);

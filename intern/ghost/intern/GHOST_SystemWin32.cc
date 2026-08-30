@@ -328,15 +328,15 @@ GHOST_IContext *GHOST_SystemWin32::createOffscreenContext(GHOST_GPUSettings gpu_
       HGLRC prev_context = wglGetCurrentContext();
       HDC prev_hdc = wglGetCurrentDC();
 
-      for (int minor = 6; minor >= 3; --minor) {
+      for (const GHOST_GLVersion &version : GHOST_OPENGL_VERSIONS) {
         GHOST_ContextWGL *context = new GHOST_ContextWGL(
             context_params_offscreen,
             true,
             nullptr,
             nullptr,
             WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
-            4,
-            minor,
+            version.major,
+            version.minor,
             (context_params_offscreen.is_debug ? WGL_CONTEXT_DEBUG_BIT_ARB : 0),
             GHOST_OPENGL_WGL_RESET_NOTIFICATION_STRATEGY);
 

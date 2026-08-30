@@ -179,6 +179,33 @@ bool GPU_vertex_pipeline_stores_and_atomics_support()
   return GCaps.vertex_pipeline_stores_and_atomics_support;
 }
 
+bool GPU_compute_shader_support()
+{
+  return GCaps.compute_shader_support;
+}
+
+bool GPU_shader_storage_buffer_objects_support()
+{
+  return GCaps.shader_storage_buffer_objects_support;
+}
+
+bool GPU_shader_image_load_store_support()
+{
+  return GCaps.shader_image_load_store_support;
+}
+
+bool GPU_shader_draw_parameters_support()
+{
+  return GCaps.shader_draw_parameters_support;
+}
+
+bool GPU_backend_is_legacy_opengl()
+{
+  /* Compute shaders and shader storage buffers are the two features the modern draw pipeline is
+   * built on. A context missing either of them is a legacy (pre-4.3) OpenGL context. */
+  return !GCaps.compute_shader_support || !GCaps.shader_storage_buffer_objects_support;
+}
+
 int GPU_max_shader_storage_buffer_bindings()
 {
   return GCaps.max_shader_storage_buffer_bindings;

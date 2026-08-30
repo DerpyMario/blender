@@ -13,6 +13,8 @@
 
 #include "GPU_capabilities.hh"
 
+#include "gpu_capabilities_private.hh"
+
 #include "gl_context.hh"
 #include "gl_framebuffer.hh"
 #include "gl_texture.hh"
@@ -299,6 +301,12 @@ void GLStateManager::set_provoking_vert(const GPUProvokingVertex vert)
 
 void GLStateManager::set_clip_control(const bool enable)
 {
+  if (!GLContext::clip_control_support) {
+    /* Legacy OpenGL: the depth range stays at -1..1. Shaders are not patched to remap their
+     * clip-space depth either (see #GLShader::vertex_interface_declare), so the two stay in
+     * sync and drawing is still correct, only without the extra depth precision. */
+    return;
+  }
   if (enable) {
     /* Match Vulkan and Metal by default. */
     glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
@@ -636,6 +644,11 @@ uint8_t GLStateManager::bound_image_slots()
 
 void GLStateManager::issue_barrier(GPUBarrier barrier_bits)
 {
+  if (!GCaps.shader_image_load_store_support) {
+    /* `glMemoryBarrier` comes with `GL_ARB_shader_image_load_store`. Nothing on the legacy
+     * code-path writes through images or storage buffers, so there is nothing to order. */
+    return;
+  }
   glMemoryBarrier(to_gl(barrier_bits));
 }
 

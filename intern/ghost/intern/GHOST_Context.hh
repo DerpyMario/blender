@@ -14,6 +14,32 @@
 
 #include <cstdlib> /* For `nullptr`. */
 
+/**
+ * An OpenGL version to request when creating a context.
+ */
+struct GHOST_GLVersion {
+  int major;
+  int minor;
+};
+
+/**
+ * The OpenGL versions Blender tries to create a context for, most capable first.
+ *
+ * 4.3 and above give the GPU module everything the compute-shader based render pipeline needs.
+ * Below that it falls back to a legacy code-path with reduced functionality (no EEVEE), for which
+ * 3.3 is the absolute minimum. See `GLBackend::platform_init`.
+ */
+constexpr GHOST_GLVersion GHOST_OPENGL_VERSIONS[] = {
+    {4, 6},
+    {4, 5},
+    {4, 4},
+    {4, 3},
+    {4, 2},
+    {4, 1},
+    {4, 0},
+    {3, 3},
+};
+
 class GHOST_Context : public GHOST_IContext {
  protected:
   static thread_local inline GHOST_Context *active_context_;

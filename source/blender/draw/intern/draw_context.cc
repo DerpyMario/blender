@@ -1332,10 +1332,14 @@ void DRWContext::enable_engines(bool gpencil_engine_needed, RenderEngineType *re
       case OB_MATERIAL:
       case OB_RENDER:
       default:
-        if (render_engine_type == &DRW_engine_viewport_eevee_type) {
+        if (render_engine_type == &DRW_engine_viewport_eevee_type && eevee::is_supported()) {
           view_data.eevee.set_used(true);
         }
-        else if (render_engine_type == &DRW_engine_viewport_workbench_type) {
+        else if (render_engine_type == &DRW_engine_viewport_eevee_type ||
+                 render_engine_type == &DRW_engine_viewport_workbench_type)
+        {
+          /* EEVEE cannot run on the legacy OpenGL code-path, fall back to Workbench so the
+           * viewport keeps drawing. See #eevee::is_supported. */
           view_data.workbench.set_used(true);
         }
         else if ((render_engine_type->flag & RE_INTERNAL) == 0) {

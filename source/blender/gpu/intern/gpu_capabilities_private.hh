@@ -49,6 +49,17 @@ struct GPUCapabilities {
   bool ray_query_support = false;
   bool vertex_pipeline_stores_and_atomics_support = false;
 
+  /* Features that are always present on the Metal and Vulkan backends, but that are only
+   * available on OpenGL 4.3 and above. They default to true so that backends which do not
+   * have a legacy code-path never have to set them. The OpenGL backend lowers them when
+   * running on a pre-4.3 context. See #GPU_backend_is_legacy_opengl. */
+  bool compute_shader_support = true;
+  bool shader_storage_buffer_objects_support = true;
+  bool shader_image_load_store_support = true;
+  bool shader_draw_parameters_support = true;
+  bool texture_view_support = true;
+  bool indirect_draw_support = true;
+
   /** Can an sRGB texture be written, with the hardware performing conversion to sRGB? */
   bool srgb_write_direct_support = false;
   /* Can an sRGB texture be bound as writable with a non-sRGB (UNORM) view? */

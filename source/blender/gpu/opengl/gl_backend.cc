@@ -125,6 +125,59 @@ static bool is_bad_AMD_driver(const char *version_cstr)
   return true;
 }
 
+/**
+ * Whether the current context can run the modern, compute-shader based render pipeline.
+ *
+ * Determined once by #GLBackend::platform_init and consumed by #GLBackend::capabilities_init,
+ * which runs right after it. When false, Blender falls back to the legacy OpenGL 3.3 code-path:
+ * compute shaders, shader storage buffers and the EEVEE render engine are all disabled.
+ */
+static bool g_modern_pipeline_support = false;
+
+/**
+ * Test the OpenGL 4.3 era features the modern render pipeline is built on.
+ *
+ * A context that fails any of these is still usable, but only through the legacy code-path.
+ * Reasons are printed once at startup so that users can tell why EEVEE is unavailable.
+ */
+static bool detect_modern_pipeline_support()
+{
+  if (epoxy_gl_version() < 43) {
+    std::cout << "Notice: OpenGL 4.3 is not available, falling back to the legacy OpenGL "
+                 "code-path. EEVEE will not be available.\n";
+    return false;
+  }
+
+  bool supported = true;
+  auto require = [&supported](const bool condition, const char *what) {
+    if (!condition) {
+      std::cout << "Notice: The OpenGL implementation doesn't support " << what
+                << ", falling back to the legacy OpenGL code-path. EEVEE will not be "
+                   "available.\n";
+      supported = false;
+    }
+  };
+
+  /* The draw pipeline binds shader storage buffers in every stage. */
+  GLint max_ssbo_binds_vertex;
+  GLint max_ssbo_binds_fragment;
+  GLint max_ssbo_binds_compute;
+  glGetIntegerv(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS, &max_ssbo_binds_vertex);
+  glGetIntegerv(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS, &max_ssbo_binds_fragment);
+  glGetIntegerv(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS, &max_ssbo_binds_compute);
+  const GLint max_ssbo_binds = std::min(
+      {max_ssbo_binds_vertex, max_ssbo_binds_fragment, max_ssbo_binds_compute});
+  require(max_ssbo_binds >= 12, "at least 12 SSBO binding locations");
+
+  /* Compute shaders, shader storage buffers and image load/store are all core in 4.3, so only
+   * the ones promoted to core later have to be tested for. */
+  require(epoxy_has_gl_extension("GL_ARB_shader_draw_parameters"), "ARB_shader_draw_parameters");
+  require(epoxy_has_gl_extension("GL_ARB_clip_control"), "ARB_clip_control");
+  require(epoxy_has_gl_extension("GL_ARB_get_texture_sub_image"), "ARB_get_texture_sub_image");
+
+  return supported;
+}
+
 void GLBackend::platform_init()
 {
   BLI_assert(!GPG.initialized);
@@ -219,11 +272,19 @@ void GLBackend::platform_init()
     printf("Renderer: %s\n", renderer);
   }
 
-  /* Detect support level */
-  if (!(epoxy_gl_version() >= 43)) {
+  /* Detect support level.
+   *
+   * OpenGL 3.3 is the minimum required version. Contexts between 3.3 and 4.3 (and 4.3+ contexts
+   * that are missing one of the extensions the modern pipeline needs) run through the legacy
+   * code-path with reduced functionality instead of being rejected outright. */
+  if (!(epoxy_gl_version() >= 33)) {
     support_level = GPU_SUPPORT_LEVEL_UNSUPPORTED;
   }
   else {
+    g_modern_pipeline_support = detect_modern_pipeline_support();
+    if (!g_modern_pipeline_support) {
+      support_level = GPU_SUPPORT_LEVEL_LIMITED;
+    }
 #if defined(WIN32)
     long long driverVersion = 0;
     if (device & GPU_DEVICE_QUALCOMM) {
@@ -287,43 +348,17 @@ void GLBackend::platform_init()
         support_level = GPU_SUPPORT_LEVEL_UNSUPPORTED;
       }
     }
-
-    /* Check SSBO bindings requirement. */
-    GLint max_ssbo_binds_vertex;
-    GLint max_ssbo_binds_fragment;
-    GLint max_ssbo_binds_compute;
-    glGetIntegerv(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS, &max_ssbo_binds_vertex);
-    glGetIntegerv(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS, &max_ssbo_binds_fragment);
-    glGetIntegerv(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS, &max_ssbo_binds_compute);
-    GLint max_ssbo_binds = std::min(
-        {max_ssbo_binds_vertex, max_ssbo_binds_fragment, max_ssbo_binds_compute});
-    if (max_ssbo_binds < 12) {
-      std::cout << "Warning: Unsupported platform as it supports max " << max_ssbo_binds
-                << " SSBO binding locations\n";
-      support_level = GPU_SUPPORT_LEVEL_UNSUPPORTED;
-    }
-
-    if (!epoxy_has_gl_extension("GL_ARB_shader_draw_parameters")) {
-      std::cout << "Error: The OpenGL implementation doesn't support ARB_shader_draw_parameters\n";
-      support_level = GPU_SUPPORT_LEVEL_UNSUPPORTED;
-    }
-
-    if (!epoxy_has_gl_extension("GL_ARB_clip_control")) {
-      std::cout << "Error: The OpenGL implementation doesn't support ARB_clip_control\n";
-      support_level = GPU_SUPPORT_LEVEL_UNSUPPORTED;
-    }
-
-    if (!epoxy_has_gl_extension("GL_ARB_get_texture_sub_image")) {
-      std::cout << "Error: The OpenGL implementation doesn't support ARB_get_texture_sub_image\n";
-      support_level = GPU_SUPPORT_LEVEL_UNSUPPORTED;
-    }
   }
 
-  /* Compute shaders have some issues with those versions (see #94936). */
+  /* Compute shaders have some issues with those versions (see #94936). Drop to the legacy
+   * code-path rather than refusing to start, as it does not use compute shaders at all. */
   if ((device & GPU_DEVICE_ATI) && (driver & GPU_DRIVER_OFFICIAL) &&
       (strstr(version, "4.5.14831") || strstr(version, "4.5.14760")))
   {
-    support_level = GPU_SUPPORT_LEVEL_UNSUPPORTED;
+    g_modern_pipeline_support = false;
+    if (support_level == GPU_SUPPORT_LEVEL_SUPPORTED) {
+      support_level = GPU_SUPPORT_LEVEL_LIMITED;
+    }
   }
 
   GPG.init(device,
@@ -431,6 +466,15 @@ static void detect_workarounds()
     GLContext::framebuffer_fetch_support = false;
     GLContext::texture_barrier_support = false;
     GCaps.stencil_export_support = false;
+    /* Turn off the extensions the legacy OpenGL 3.3 code-path can do without, so that it can be
+     * exercised on modern hardware. */
+    GLContext::direct_state_access_support = false;
+    GLContext::texture_storage_support = false;
+    GLContext::get_texture_sub_image_support = false;
+    GLContext::base_instance_support = false;
+    /* Must be cleared together with `base_instance_support`: #GLBatch::draw then passes the base
+     * instance through the `gpu_BaseInstance` uniform that the shader patch declares. */
+    GCaps.shader_draw_parameters_support = false;
 
 #if 0
     /* Do not alter OpenGL 4.3 features.
@@ -555,6 +599,11 @@ static void detect_workarounds()
     GCaps.texture_pool_workaround = true;
   }
 
+  /* #GLTexturePool aliases its entries through `glTextureView`. */
+  if (!GCaps.texture_view_support) {
+    GCaps.texture_pool_workaround = true;
+  }
+
 #ifdef _WIN32
   if ((GPU_type_matches(GPU_DEVICE_INTEL, GPU_OS_ANY, GPU_DRIVER_ANY) ||
        GPU_type_matches(GPU_DEVICE_INTEL_UHD, GPU_OS_ANY, GPU_DRIVER_ANY)))
@@ -623,6 +672,14 @@ bool GLContext::stencil_texturing_support = false;
 bool GLContext::texture_barrier_support = false;
 bool GLContext::texture_filter_anisotropic_support = false;
 bool GLContext::derivative_control_support = false;
+bool GLContext::explicit_location_support = false;
+bool GLContext::texture_storage_support = false;
+bool GLContext::get_texture_sub_image_support = false;
+bool GLContext::clip_control_support = false;
+bool GLContext::base_instance_support = false;
+bool GLContext::texture_gather_support = false;
+bool GLContext::texture_cube_map_array_support = false;
+bool GLContext::geometry_shader_invocations_support = false;
 
 /** Workarounds. */
 
@@ -632,6 +689,20 @@ bool GLContext::unused_fb_slot_workaround = false;
 void GLBackend::capabilities_init()
 {
   BLI_assert(epoxy_gl_version() >= 33);
+
+  /* Features the legacy OpenGL 3.3 code-path does without. Everything that queries a limit
+   * introduced by one of them has to stay behind these checks, otherwise the driver raises
+   * `GL_INVALID_ENUM` for every unknown token. */
+  GCaps.compute_shader_support = g_modern_pipeline_support;
+  GCaps.shader_storage_buffer_objects_support = g_modern_pipeline_support;
+  GCaps.shader_image_load_store_support = g_modern_pipeline_support;
+  GCaps.shader_draw_parameters_support = g_modern_pipeline_support &&
+                                         epoxy_has_gl_extension("GL_ARB_shader_draw_parameters");
+  GCaps.texture_view_support = epoxy_gl_version() >= 43 ||
+                               epoxy_has_gl_extension("GL_ARB_texture_view");
+  GCaps.indirect_draw_support = epoxy_gl_version() >= 43 ||
+                                epoxy_has_gl_extension("GL_ARB_multi_draw_indirect");
+
   /* Common Capabilities. */
   glGetIntegerv(GL_MAX_TEXTURE_SIZE, &GCaps.max_texture_size);
   glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &GCaps.max_texture_layers);
@@ -642,7 +713,12 @@ void GLBackend::capabilities_init()
   glGetIntegerv(GL_MAX_ELEMENTS_VERTICES, &GCaps.max_batch_vertices);
   glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &GCaps.max_vertex_attribs);
   glGetIntegerv(GL_MAX_VARYING_FLOATS, &GCaps.max_varying_floats);
-  glGetIntegerv(GL_MAX_IMAGE_UNITS, &GCaps.max_images);
+  if (GCaps.shader_image_load_store_support) {
+    glGetIntegerv(GL_MAX_IMAGE_UNITS, &GCaps.max_images);
+  }
+  else {
+    GCaps.max_images = 0;
+  }
 
   glGetIntegerv(GL_NUM_EXTENSIONS, &GCaps.extensions_len);
   GCaps.extension_get = gl_extension_get;
@@ -655,22 +731,28 @@ void GLBackend::capabilities_init()
 
   GCaps.srgb_write_view_support = true;
 
-  glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 0, &GCaps.max_work_group_count[0]);
-  glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 1, &GCaps.max_work_group_count[1]);
-  glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 2, &GCaps.max_work_group_count[2]);
-  glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 0, &GCaps.max_work_group_size[0]);
-  glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 1, &GCaps.max_work_group_size[1]);
-  glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 2, &GCaps.max_work_group_size[2]);
-  glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS, &GCaps.max_shader_storage_buffer_bindings);
-  glGetIntegerv(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS, &GCaps.max_compute_shader_storage_blocks);
-  int64_t max_ssbo_size, max_ubo_size;
+  if (GCaps.compute_shader_support) {
+    glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 0, &GCaps.max_work_group_count[0]);
+    glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 1, &GCaps.max_work_group_count[1]);
+    glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 2, &GCaps.max_work_group_count[2]);
+    glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 0, &GCaps.max_work_group_size[0]);
+    glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 1, &GCaps.max_work_group_size[1]);
+    glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 2, &GCaps.max_work_group_size[2]);
+    glGetIntegerv(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS, &GCaps.max_compute_shader_storage_blocks);
+  }
+  int64_t max_ubo_size;
   glGetInteger64v(GL_MAX_UNIFORM_BLOCK_SIZE, &max_ubo_size);
   GCaps.max_uniform_buffer_size = size_t(max_ubo_size);
-  glGetInteger64v(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &max_ssbo_size);
-  GCaps.max_storage_buffer_size = size_t(max_ssbo_size);
-  GLint ssbo_alignment;
-  glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &ssbo_alignment);
-  GCaps.storage_buffer_alignment = size_t(ssbo_alignment);
+  if (GCaps.shader_storage_buffer_objects_support) {
+    int64_t max_ssbo_size;
+    glGetIntegerv(GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS,
+                  &GCaps.max_shader_storage_buffer_bindings);
+    glGetInteger64v(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &max_ssbo_size);
+    GCaps.max_storage_buffer_size = size_t(max_ssbo_size);
+    GLint ssbo_alignment;
+    glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &ssbo_alignment);
+    GCaps.storage_buffer_alignment = size_t(ssbo_alignment);
+  }
 
   GCaps.stencil_export_support = epoxy_has_gl_extension("GL_ARB_shader_stencil_export");
 
@@ -680,14 +762,17 @@ void GLBackend::capabilities_init()
                 reinterpret_cast<int *>(&GCaps.max_buffer_texture_size));
   glGetIntegerv(GL_MAX_CUBE_MAP_TEXTURE_SIZE, &GLContext::max_cubemap_size);
   glGetIntegerv(GL_MAX_FRAGMENT_UNIFORM_BLOCKS, &GLContext::max_ubo_binds);
-  GLint max_ssbo_binds;
-  GLContext::max_ssbo_binds = 999999;
-  glGetIntegerv(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS, &max_ssbo_binds);
-  GLContext::max_ssbo_binds = min_ii(GLContext::max_ssbo_binds, max_ssbo_binds);
-  glGetIntegerv(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS, &max_ssbo_binds);
-  GLContext::max_ssbo_binds = min_ii(GLContext::max_ssbo_binds, max_ssbo_binds);
-  glGetIntegerv(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS, &max_ssbo_binds);
-  GLContext::max_ssbo_binds = min_ii(GLContext::max_ssbo_binds, max_ssbo_binds);
+  GLContext::max_ssbo_binds = 0;
+  if (GCaps.shader_storage_buffer_objects_support) {
+    GLint max_ssbo_binds;
+    GLContext::max_ssbo_binds = 999999;
+    glGetIntegerv(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS, &max_ssbo_binds);
+    GLContext::max_ssbo_binds = min_ii(GLContext::max_ssbo_binds, max_ssbo_binds);
+    glGetIntegerv(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS, &max_ssbo_binds);
+    GLContext::max_ssbo_binds = min_ii(GLContext::max_ssbo_binds, max_ssbo_binds);
+    glGetIntegerv(GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS, &max_ssbo_binds);
+    GLContext::max_ssbo_binds = min_ii(GLContext::max_ssbo_binds, max_ssbo_binds);
+  }
   GLContext::debug_layer_support = epoxy_gl_version() >= 43 ||
                                    epoxy_has_gl_extension("GL_KHR_debug") ||
                                    epoxy_has_gl_extension("GL_ARB_debug_output");
@@ -706,6 +791,25 @@ void GLBackend::capabilities_init()
   GLContext::stencil_texturing_support = epoxy_gl_version() >= 43;
   GLContext::derivative_control_support = epoxy_gl_version() >= 45 ||
                                           epoxy_has_gl_extension("GL_ARB_derivative_control");
+  /* Covers both `layout(location = ...)` on uniforms and `layout(binding = ...)` on samplers,
+   * images and interface blocks, which come from two different extensions before 4.3. */
+  GLContext::explicit_location_support =
+      epoxy_gl_version() >= 43 || (epoxy_has_gl_extension("GL_ARB_explicit_uniform_location") &&
+                                   epoxy_has_gl_extension("GL_ARB_shading_language_420pack"));
+  GLContext::texture_storage_support = epoxy_gl_version() >= 42 ||
+                                       epoxy_has_gl_extension("GL_ARB_texture_storage");
+  GLContext::get_texture_sub_image_support = epoxy_has_gl_extension(
+      "GL_ARB_get_texture_sub_image");
+  GLContext::clip_control_support = epoxy_has_gl_extension("GL_ARB_clip_control");
+  GLContext::base_instance_support = epoxy_gl_version() >= 42 ||
+                                     epoxy_has_gl_extension("GL_ARB_base_instance");
+  GLContext::texture_gather_support = epoxy_gl_version() >= 40 ||
+                                      epoxy_has_gl_extension("GL_ARB_texture_gather");
+  GLContext::texture_cube_map_array_support = epoxy_gl_version() >= 40 ||
+                                              epoxy_has_gl_extension(
+                                                  "GL_ARB_texture_cube_map_array");
+  GLContext::geometry_shader_invocations_support = epoxy_gl_version() >= 40 ||
+                                                   epoxy_has_gl_extension("GL_ARB_gpu_shader5");
   GLContext::texture_filter_anisotropic_support = epoxy_has_gl_extension(
       "GL_EXT_texture_filter_anisotropic");
 

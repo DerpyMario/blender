@@ -4,6 +4,9 @@
 
 #include "BLI_rect.hh"
 
+#include "BLT_translation.hh"
+
+#include "GPU_capabilities.hh"
 #include "GPU_framebuffer.hh"
 
 #include "ED_screen.hh"
@@ -33,12 +36,25 @@ void Engine::free_static()
   ShaderModule::module_free();
 }
 
+bool is_supported()
+{
+  return !GPU_backend_is_legacy_opengl();
+}
+
 }  // namespace eevee
 
 using namespace blender::eevee;
 
 static void eevee_render(RenderEngine *engine, Depsgraph *depsgraph)
 {
+  if (!is_supported()) {
+    RE_engine_set_error_message(
+        engine,
+        RPT_("EEVEE requires a GPU with compute shader support. Use Workbench or Cycles "
+             "instead."));
+    return;
+  }
+
   Instance *instance = nullptr;
 
   auto eevee_render_to_image = [&](RenderEngine *engine, RenderLayer *layer, const rcti /*rect*/) {

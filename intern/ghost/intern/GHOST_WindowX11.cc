@@ -1245,15 +1245,15 @@ GHOST_Context *GHOST_WindowX11::newDrawingContext(GHOST_TDrawingContextType type
     case GHOST_kDrawingContextTypeOpenGL: {
 #  ifdef USE_EGL
       /* Try to initialize an EGL context. */
-      for (int minor = 6; minor >= 3; --minor) {
+      for (const GHOST_GLVersion &version : GHOST_OPENGL_VERSIONS) {
         GHOST_Context *context = GHOST_ContextEGL(
             this->system_,
             want_context_params_,
             EGLNativeWindowType(window_),
             EGLNativeDisplayType(display_),
             EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-            4,
-            minor,
+            version.major,
+            version.minor,
             GHOST_OPENGL_EGL_CONTEXT_FLAGS |
                 (want_context_params_.is_debug ? EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR : 0),
             GHOST_OPENGL_EGL_RESET_NOTIFICATION_STRATEGY,
@@ -1266,15 +1266,15 @@ GHOST_Context *GHOST_WindowX11::newDrawingContext(GHOST_TDrawingContextType type
       /* EGL initialization failed, try to fall back to a GLX context. */
 #  endif
 
-      for (int minor = 6; minor >= 3; --minor) {
+      for (const GHOST_GLVersion &version : GHOST_OPENGL_VERSIONS) {
         GHOST_Context *context = new GHOST_ContextGLX(
             want_context_params_,
             window_,
             display_,
             (GLXFBConfig)fbconfig_,
             GLX_CONTEXT_CORE_PROFILE_BIT_ARB,
-            4,
-            minor,
+            version.major,
+            version.minor,
             GHOST_OPENGL_GLX_CONTEXT_FLAGS |
                 (want_context_params_.is_debug ? GLX_CONTEXT_DEBUG_BIT_ARB : 0),
             GHOST_OPENGL_GLX_RESET_NOTIFICATION_STRATEGY);

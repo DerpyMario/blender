@@ -67,6 +67,25 @@ bool GPU_stencil_export_support();
 bool GPU_ray_query_support();
 bool GPU_vertex_pipeline_stores_and_atomics_support();
 
+/**
+ * Features which are guaranteed on the Metal and Vulkan backends and on OpenGL 4.3 and above,
+ * but which can be missing when Blender runs on a legacy OpenGL 3.3 context.
+ *
+ * Code that can degrade gracefully should test these instead of assuming they are available.
+ * Code that cannot should be guarded by #GPU_backend_is_legacy_opengl at a higher level so that
+ * the whole feature is disabled up-front (as is done for the EEVEE render engine).
+ */
+bool GPU_compute_shader_support();
+bool GPU_shader_storage_buffer_objects_support();
+bool GPU_shader_image_load_store_support();
+bool GPU_shader_draw_parameters_support();
+
+/**
+ * True when the active backend is an OpenGL context that is older than 4.3, i.e. one that cannot
+ * run the compute-shader based render pipeline. Always false for the Metal and Vulkan backends.
+ */
+bool GPU_backend_is_legacy_opengl();
+
 bool GPU_mem_stats_supported();
 void GPU_mem_stats_get(int *r_totalmem, int *r_freemem);
 

@@ -2563,15 +2563,15 @@ GHOST_Context *GHOST_WindowWayland::newDrawingContext(GHOST_TDrawingContextType 
 
 #ifdef WITH_OPENGL_BACKEND
     case GHOST_kDrawingContextTypeOpenGL: {
-      for (int minor = 6; minor >= 3; --minor) {
+      for (const GHOST_GLVersion &version : GHOST_OPENGL_VERSIONS) {
         GHOST_Context *context = new GHOST_ContextEGL(
             system_,
             want_context_params_,
             EGLNativeWindowType(window_->backend.egl_window),
             EGLNativeDisplayType(system_->wl_display_get()),
             EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-            4,
-            minor,
+            version.major,
+            version.minor,
             GHOST_OPENGL_EGL_CONTEXT_FLAGS |
                 (want_context_params_.is_debug ? EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR : 0),
             GHOST_OPENGL_EGL_RESET_NOTIFICATION_STRATEGY,

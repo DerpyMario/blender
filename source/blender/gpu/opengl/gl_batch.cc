@@ -13,6 +13,7 @@
 #include "BLI_assert.hh"
 
 #include "GPU_batch.hh"
+#include "gpu_capabilities_private.hh"
 #include "gpu_shader_private.hh"
 
 #include "gl_context.hh"
@@ -258,6 +259,34 @@ void GLBatch::draw(int v_first, int v_count, int i_first, int i_count)
 
   GLenum gl_type = to_gl(prim_type);
 
+  if (!GLContext::base_instance_support) {
+    /* `GL_ARB_base_instance` is core since OpenGL 4.2. Instance attributes are not bound through
+     * the vertex array (see #GLVertArray::update_bindings), so the base instance only reaches the
+     * shader through `gpu_BaseInstance`, which the legacy shader patch declares as a plain
+     * uniform instead of aliasing `gl_BaseInstanceARB`. */
+    Shader *shader = GLContext::get()->shader;
+    if (shader != nullptr) {
+      const int32_t location = shader->interface->uniform_builtin(GPU_UNIFORM_BASE_INSTANCE);
+      if (location != -1) {
+        glUniform1i(location, i_first);
+      }
+    }
+
+    if (elem) {
+      const GLIndexBuf *el = this->elem_();
+      GLenum index_type = to_gl(el->index_type_);
+      GLint base_index = el->index_base_;
+      void *v_first_ofs = el->offset_ptr(v_first);
+
+      glDrawElementsInstancedBaseVertex(
+          gl_type, v_count, index_type, v_first_ofs, i_count, base_index);
+    }
+    else {
+      glDrawArraysInstanced(gl_type, v_first, v_count, i_count);
+    }
+    return;
+  }
+
   if (elem) {
     const GLIndexBuf *el = this->elem_();
     GLenum index_type = to_gl(el->index_type_);
@@ -275,6 +304,13 @@ void GLBatch::draw(int v_first, int v_count, int i_first, int i_count)
 void GLBatch::draw_indirect(gpu::StorageBuf *indirect_buf, intptr_t offset)
 {
   GL_CHECK_RESOURCES("Batch");
+
+  if (!GCaps.indirect_draw_support) {
+    /* Indirect draws are only issued by the compute based draw pipeline, which is disabled on the
+     * legacy code-path. */
+    BLI_assert_unreachable();
+    return;
+  }
 
   this->bind();
   dynamic_cast<GLStorageBuf *>(indirect_buf)->bind_as(GL_DRAW_INDIRECT_BUFFER);
@@ -298,6 +334,13 @@ void GLBatch::multi_draw_indirect(gpu::StorageBuf *indirect_buf,
                                   intptr_t stride)
 {
   GL_CHECK_RESOURCES("Batch");
+
+  if (!GCaps.indirect_draw_support) {
+    /* Indirect draws are only issued by the compute based draw pipeline, which is disabled on the
+     * legacy code-path. */
+    BLI_assert_unreachable();
+    return;
+  }
 
   this->bind();
   dynamic_cast<GLStorageBuf *>(indirect_buf)->bind_as(GL_DRAW_INDIRECT_BUFFER);

@@ -88,13 +88,13 @@ GHOST_Context *GHOST_WindowSDL::newDrawingContext(GHOST_TDrawingContextType type
   switch (type) {
 #ifdef WITH_OPENGL_BACKEND
     case GHOST_kDrawingContextTypeOpenGL: {
-      for (int minor = 6; minor >= 3; --minor) {
+      for (const GHOST_GLVersion &version : GHOST_OPENGL_VERSIONS) {
         GHOST_Context *context = new GHOST_ContextSDL(
             want_context_params_,
             sdl_win_,
             0, /* Profile bit. */
-            4,
-            minor,
+            version.major,
+            version.minor,
             GHOST_OPENGL_SDL_CONTEXT_FLAGS,
             GHOST_OPENGL_SDL_RESET_NOTIFICATION_STRATEGY);
 

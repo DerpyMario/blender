@@ -74,6 +74,25 @@ class GLContext : public Context {
   static bool texture_filter_anisotropic_support;
   static bool derivative_control_support;
 
+  /** Features that are core in OpenGL 4.3 but optional on the legacy 3.3 code-path. */
+
+  /** `GL_ARB_explicit_uniform_location`, needed to declare `layout(location/binding = ...)`. */
+  static bool explicit_location_support;
+  /** `GL_ARB_texture_storage`, otherwise immutable textures fall back to `glTexImage*`. */
+  static bool texture_storage_support;
+  /** `GL_ARB_get_texture_sub_image`, otherwise whole mip levels are read back. */
+  static bool get_texture_sub_image_support;
+  /** `GL_ARB_clip_control`, otherwise the depth range stays at -1..1. */
+  static bool clip_control_support;
+  /** `GL_ARB_base_instance`, otherwise `gpu_BaseInstance` is passed as a uniform. */
+  static bool base_instance_support;
+  /** `GL_ARB_texture_gather`, core since 4.0. */
+  static bool texture_gather_support;
+  /** `GL_ARB_texture_cube_map_array`, core since 4.0. */
+  static bool texture_cube_map_array_support;
+  /** `GL_ARB_gpu_shader5`, core since 4.0. Required for geometry shader invocations. */
+  static bool geometry_shader_invocations_support;
+
   /** Workarounds. */
 
   static bool debug_layer_workaround;

@@ -28,7 +28,13 @@
 
 #include "gl_texture.hh"
 
+#include "CLG_log.h"
+
+#include "gpu_capabilities_private.hh"
+
 namespace blender::gpu {
+
+static CLG_LogRef LOG = {"gpu.opengl"};
 
 /* -------------------------------------------------------------------- */
 /** \name Creation & Deletion
@@ -55,6 +61,57 @@ GLTexture::~GLTexture()
   GLContext::texture_free(tex_id_);
 }
 
+/**
+ * Allocate every mip level with `glTexImage*`.
+ *
+ * Fallback for contexts without `GL_ARB_texture_storage` (core since OpenGL 4.2). The resulting
+ * texture is mutable rather than immutable, which the GPU module never depends on, but the mip
+ * range has to be pinned explicitly since `glTexImage*` does not do it for us.
+ */
+void GLTexture::storage_alloc_legacy(GLenum internal_format,
+                                     const int dimensions,
+                                     const bool is_cubemap)
+{
+  const GLenum gl_format = to_gl_data_format(format_);
+  const GLenum gl_type = to_gl(to_texture_data_format(format_));
+
+  for (int mip = 0; mip < mipmaps_; mip++) {
+    const int3 size = this->mip_size_get(mip);
+    switch (dimensions) {
+      default:
+      case 1:
+        glTexImage1D(target_, mip, internal_format, size.x, 0, gl_format, gl_type, nullptr);
+        break;
+      case 2:
+        if (is_cubemap) {
+          for (int face = 0; face < 6; face++) {
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
+                         mip,
+                         internal_format,
+                         size.x,
+                         size.y,
+                         0,
+                         gl_format,
+                         gl_type,
+                         nullptr);
+          }
+        }
+        else {
+          glTexImage2D(
+              target_, mip, internal_format, size.x, size.y, 0, gl_format, gl_type, nullptr);
+        }
+        break;
+      case 3:
+        glTexImage3D(
+            target_, mip, internal_format, size.x, size.y, size.z, 0, gl_format, gl_type, nullptr);
+        break;
+    }
+  }
+  /* `glTexStorage*` derives these from its level count, `glTexImage*` does not. */
+  glTexParameteri(target_, GL_TEXTURE_BASE_LEVEL, 0);
+  glTexParameteri(target_, GL_TEXTURE_MAX_LEVEL, mipmaps_ - 1);
+}
+
 bool GLTexture::init_internal()
 {
   target_ = to_gl_target(type_);
@@ -70,17 +127,22 @@ bool GLTexture::init_internal()
   const bool is_cubemap = bool(type_ == GPU_TEXTURE_CUBE);
   const int dimensions = (is_cubemap) ? 2 : this->dimensions_count();
 
-  switch (dimensions) {
-    default:
-    case 1:
-      glTexStorage1D(target_, mipmaps_, internal_format, w_);
-      break;
-    case 2:
-      glTexStorage2D(target_, mipmaps_, internal_format, w_, h_);
-      break;
-    case 3:
-      glTexStorage3D(target_, mipmaps_, internal_format, w_, h_, d_);
-      break;
+  if (GLContext::texture_storage_support) {
+    switch (dimensions) {
+      default:
+      case 1:
+        glTexStorage1D(target_, mipmaps_, internal_format, w_);
+        break;
+      case 2:
+        glTexStorage2D(target_, mipmaps_, internal_format, w_, h_);
+        break;
+      case 3:
+        glTexStorage3D(target_, mipmaps_, internal_format, w_, h_, d_);
+        break;
+    }
+  }
+  else {
+    this->storage_alloc_legacy(internal_format, dimensions, is_cubemap);
   }
   this->mip_range_set(0, mipmaps_ - 1);
 
@@ -120,6 +182,17 @@ bool GLTexture::init_internal(VertBuf *vbo)
 
 bool GLTexture::init_internal(gpu::Texture *src, bool use_stencil)
 {
+  if (!GCaps.texture_view_support) {
+    /* `GL_ARB_texture_view` is core since OpenGL 4.3 and has no equivalent on the legacy
+     * code-path. Texture views cannot be emulated without copying, so fail loudly instead of
+     * handing back a texture that aliases nothing. */
+    CLOG_ERROR(&LOG,
+               "Cannot create texture view \"%s\": the OpenGL implementation doesn't support "
+               "ARB_texture_view.",
+               name_.c_str());
+    return false;
+  }
+
   const GLTexture *gl_src = static_cast<const GLTexture *>(src);
   GLenum internal_format = to_gl_internal_format(format_);
   target_ = to_gl_target(type_);
@@ -493,6 +566,11 @@ void GLTexture::read(int mip, eGPUDataFormat type, void *data)
 
   const int3 extent = mip_size_get(mip);
 
+  if (!GLContext::get_texture_sub_image_support) {
+    this->read_legacy(mip, gl_format, gl_type, extent, texture_size, data);
+    return;
+  }
+
   if (is_texture_view() && format_get() == source_texture_->format_get()) {
     /* Read from the source texture, since OpenGL drivers don't seem to handle dimensions well,
      * but this only works if the view and the texture formats match. */
@@ -523,6 +601,46 @@ void GLTexture::read(int mip, eGPUDataFormat type, void *data)
                          texture_size,
                          data);
   }
+}
+
+void GLTexture::read_legacy(const int mip,
+                            const GLenum gl_format,
+                            const GLenum gl_type,
+                            const int3 extent,
+                            const size_t texture_size,
+                            void *data)
+{
+  /* `glGetTexImage` always returns a whole mip level of the bound texture, so a view of a layer
+   * sub-range has to read its source level in full and then copy its own slice out of it. */
+  const bool read_through_view = is_texture_view() &&
+                                 format_get() == source_texture_->format_get();
+  GLTexture *source = read_through_view ? static_cast<GLTexture *>(source_texture_) : this;
+  const int source_mip = read_through_view ? mip + mip_min_ : mip;
+  const int3 source_extent = source->mip_size_get(source_mip);
+
+  GLContext::state_manager_active_get()->texture_bind_temp(source);
+
+  if (source_extent == extent) {
+    glGetTexImage(source->target_, source_mip, gl_format, gl_type, data);
+    return;
+  }
+
+  /* Layers are the outermost axis of the returned data, so the wanted ones are contiguous.
+   * For 1D array textures that axis is Y, for every other array type it is Z. */
+  const bool layers_on_y = bool(type_ & GPU_TEXTURE_1D);
+  const int layer_len = std::max(layers_on_y ? extent.y : extent.z, 1);
+  const int source_layer_len = std::max(layers_on_y ? source_extent.y : source_extent.z, 1);
+  BLI_assert(view_layer_start_ + layer_len <= source_layer_len);
+
+  const size_t layer_size = texture_size / size_t(layer_len);
+  void *source_data = MEM_mallocN(layer_size * size_t(source_layer_len), __func__);
+
+  glGetTexImage(source->target_, source_mip, gl_format, gl_type, source_data);
+  std::memcpy(data,
+              static_cast<uint8_t *>(source_data) + layer_size * size_t(view_layer_start_),
+              texture_size);
+
+  MEM_freeN(source_data);
 }
 
 /** \} */

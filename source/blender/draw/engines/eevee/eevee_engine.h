@@ -23,5 +23,14 @@ struct Engine : public DrawEngine::Pointer {
   static void free_static();
 };
 
+/**
+ * Whether EEVEE can run on the active GPU backend.
+ *
+ * The engine is built on compute shaders and shader storage buffers, so it is unavailable on the
+ * GPU module's legacy OpenGL 3.3 code-path. Callers must check this before selecting the engine;
+ * the viewport falls back to Workbench and rendering reports an error.
+ */
+bool is_supported();
+
 }  // namespace eevee
 }  // namespace blender

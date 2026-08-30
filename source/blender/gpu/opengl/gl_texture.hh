@@ -116,6 +116,11 @@ class GLTexture : public Texture {
  private:
   bool proxy_check(int mip);
   void mip_range_set(int min, int max);
+  /** `glTexImage*` based allocation, for contexts without `GL_ARB_texture_storage`. */
+  void storage_alloc_legacy(GLenum internal_format, int dimensions, bool is_cubemap);
+  /** `glGetTexImage` based read-back, for contexts without `GL_ARB_get_texture_sub_image`. */
+  void read_legacy(
+      int mip, GLenum gl_format, GLenum gl_type, int3 extent, size_t texture_size, void *data);
   void stencil_texture_mode_set(bool use_stencil);
   void update_sub_direct_state_access(
       int mip, int offset[3], int extent[3], GLenum gl_format, GLenum gl_type, const void *data);

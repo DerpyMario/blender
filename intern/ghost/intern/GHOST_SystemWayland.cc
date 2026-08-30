@@ -10022,7 +10022,7 @@ GHOST_IContext *GHOST_SystemWayland::createOffscreenContext(GHOST_GPUSettings gp
       wl_surface *wl_surface = wl_compositor_create_surface(wl_compositor_get());
       wl_egl_window *egl_window = wl_surface ? wl_egl_window_create(wl_surface, 1, 1) : nullptr;
 
-      for (int minor = 6; minor >= 3; --minor) {
+      for (const GHOST_GLVersion &version : GHOST_OPENGL_VERSIONS) {
         /* Caller must lock `system->server_mutex`. */
         GHOST_Context *context = new GHOST_ContextEGL(
             this,
@@ -10030,8 +10030,8 @@ GHOST_IContext *GHOST_SystemWayland::createOffscreenContext(GHOST_GPUSettings gp
             EGLNativeWindowType(egl_window),
             EGLNativeDisplayType(display_->wl.display),
             EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-            4,
-            minor,
+            version.major,
+            version.minor,
             GHOST_OPENGL_EGL_CONTEXT_FLAGS |
                 (context_params_offscreen.is_debug ? EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR : 0),
             GHOST_OPENGL_EGL_RESET_NOTIFICATION_STRATEGY,

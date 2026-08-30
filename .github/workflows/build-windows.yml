@@ -54,16 +54,22 @@ jobs:
       # Keep the build off the workspace drive, which is the smaller of the two.
       BUILD_DIR: C:\blender-build
       LIB_DIR: lib/windows_x64
+      # This GitHub repository stores Git LFS pointers but not the objects they name, so its own
+      # LFS endpoint answers "Object does not exist on the server". The objects are served
+      # anonymously by the upstream repository, which is where the tracked files came from.
+      LFS_URL: https://projects.blender.org/blender/blender.git/info/lfs
 
     steps:
       - name: Check out source
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          # The precompiled libraries are fetched separately below, so that Git LFS can be
-          # pointed at just that submodule.
-          submodules: false
+          # LFS objects are fetched from the upstream endpoint in a later step; letting checkout
+          # try first would only fail against this repository's own endpoint.
           lfs: false
+          # The precompiled libraries are a separate submodule, checked out below so that its LFS
+          # objects can be fetched in one pass instead of smudged file by file.
+          submodules: false
 
       - name: Show environment
         shell: pwsh
@@ -86,6 +92,23 @@ jobs:
           }
           choco install ninja -y --no-progress
 
+      # The datafiles the build embeds (startup.blend, icons, locales, ...) are LFS-tracked, and
+      # CMake refuses to configure while they are still pointer files.
+      - name: Fetch Git LFS objects
+        shell: pwsh
+        run: |
+          git config lfs.url $env:LFS_URL
+          # tests/ is ~760 MB of the ~790 MB total and is only needed when building the tests.
+          # Excluding rather than including keeps a pattern that under-matches merely wasteful
+          # instead of leaving a file behind as a pointer.
+          if ('${{ inputs.with_tests }}' -eq 'true') {
+            git lfs pull
+          }
+          else {
+            git lfs pull --exclude=tests
+          }
+          if ($LASTEXITCODE -ne 0) { throw "git lfs pull failed against $env:LFS_URL" }
+
       # Mirrors build_files/windows/check_libraries.cmd, which would otherwise stop and ask
       # whether to download the libraries. Skipping the LFS smudge filter during the submodule
       # checkout and pulling afterwards keeps the working tree from being written twice.
@@ -99,6 +122,20 @@ jobs:
           set GIT_LFS_SKIP_SMUDGE=
           git -C "%LIB_DIR%" lfs pull
           if errorlevel 1 exit /b 1
+
+      - name: Verify the checkout is complete
+        shell: pwsh
+        run: |
+          # CMakeLists.txt applies the same >1KB test to catch an un-smudged LFS pointer file.
+          $startup = 'release/datafiles/startup.blend'
+          $size = (Get-Item $startup).Length
+          if ($size -lt 1024) {
+            throw "$startup is $size bytes, so Git LFS objects were not fetched for the source tree."
+          }
+          if (-not (Test-Path "$env:LIB_DIR/.git")) {
+            throw "The precompiled libraries are missing from $env:LIB_DIR."
+          }
+          Write-Host "Source tree and precompiled libraries look complete."
 
       - name: Compose make.bat arguments
         shell: pwsh

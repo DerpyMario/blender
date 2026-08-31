@@ -16,8 +16,9 @@
 #include "BKE_global.hh"
 
 #include "BLI_assert.hh"
+#include "BLI_path_utils.hh"
 #include "BLI_threads.hh"
-#include "BLI_vector_set.hh"
+#include "BLI_vector.hh"
 
 #include "DNA_userdef_types.h"
 
@@ -363,6 +364,8 @@ static std::optional<GPUBackendType> g_backend_type_override = std::nullopt;
 static std::optional<bool> g_backend_type_supported = std::nullopt;
 static std::optional<GHOST_GPUDevice> g_preferred_device_override = std::nullopt;
 static std::optional<int> g_vsync_override = std::nullopt;
+static std::optional<bool> g_opengl_on_d3d_override = std::nullopt;
+static bool g_opengl_on_d3d = false;
 static GPUBackend *g_backend = nullptr;
 static GHOST_ISystem *g_ghost_system = nullptr;
 
@@ -450,6 +453,36 @@ GHOST_GPUDevice GPU_backend_preferred_device_get()
   return device;
 }
 
+/**
+ * Steer the OpenGL driver onto a Direct3D 12 mapping layer, or back off it.
+ *
+ * Windows machines whose GPU vendor ships no working OpenGL driver can still get OpenGL through
+ * a translation layer over Direct3D 12: Mesa's `d3d12` Gallium driver, which Microsoft also
+ * distributes as GLOn12. It is selected with `GALLIUM_DRIVER`, which the driver reads while
+ * initializing, so this has to happen before the context is created. A vendor's native driver
+ * ignores the variable, so setting it can only redirect a Mesa-based one.
+ *
+ * This is a best-effort fall-back rather than a guarantee: whether a retry can still pick a
+ * different driver depends on how far the failed attempt got in loading the first one.
+ */
+static void gpu_backend_opengl_on_d3d_set(const bool enable)
+{
+  g_opengl_on_d3d = enable;
+#ifdef WIN32
+  BLI_setenv("GALLIUM_DRIVER", enable ? "d3d12" : nullptr);
+#endif
+}
+
+bool GPU_backend_opengl_on_d3d_get()
+{
+  return g_opengl_on_d3d;
+}
+
+void GPU_backend_opengl_on_d3d_set_override(const bool enable)
+{
+  g_opengl_on_d3d_override = enable;
+}
+
 static const char *gpu_backend_type_name(const GPUBackendType backend_type)
 {
   switch (backend_type) {
@@ -475,6 +508,18 @@ void GPU_vulkan_supported_devices_print(FILE *fp)
 }
 #endif
 
+/**
+ * One entry in the start-up fall-back chain.
+ *
+ * `opengl_on_d3d` is not a separate GPU backend: Blender still runs the OpenGL backend, only
+ * against a Direct3D 12 mapping layer rather than the vendor's own driver.
+ * See #gpu_backend_opengl_on_d3d_set.
+ */
+struct GPUBackendAttempt {
+  GPUBackendType type;
+  bool opengl_on_d3d;
+};
+
 bool GPU_backend_type_selection_detect()
 {
   /* Only detect once, can't switch backend until Blender restart. */
@@ -484,29 +529,61 @@ bool GPU_backend_type_selection_detect()
   }
   backend_type_detected = true;
 
-  VectorSet<GPUBackendType> backends_to_check;
+  Vector<GPUBackendAttempt> attempts;
+  auto add_attempt = [&attempts](const GPUBackendType type, const bool opengl_on_d3d) {
+    for (const GPUBackendAttempt &attempt : attempts) {
+      if (attempt.type == type && attempt.opengl_on_d3d == opengl_on_d3d) {
+        return;
+      }
+    }
+    attempts.append({type, opengl_on_d3d});
+  };
+
+#if defined(WITH_OPENGL_BACKEND) && defined(WIN32)
+  /* Explicitly asked for, so try it before the native driver. */
+  if (g_opengl_on_d3d_override.value_or(false)) {
+    add_attempt(GPU_BACKEND_OPENGL, true);
+  }
+#endif
   if (g_backend_type_override.has_value()) {
-    backends_to_check.add(*g_backend_type_override);
+    add_attempt(*g_backend_type_override, false);
   }
 #if defined(WITH_OPENGL_BACKEND)
-  backends_to_check.add(GPU_BACKEND_OPENGL);
+  add_attempt(GPU_BACKEND_OPENGL, false);
 #elif defined(WITH_METAL_BACKEND)
-  backends_to_check.add(GPU_BACKEND_METAL);
+  add_attempt(GPU_BACKEND_METAL, false);
 #endif
 
 #if defined(WITH_VULKAN_BACKEND)
-  backends_to_check.add(GPU_BACKEND_VULKAN);
+  add_attempt(GPU_BACKEND_VULKAN, false);
 #endif
 
-  for (const GPUBackendType backend_type : backends_to_check) {
-    GPU_backend_type_selection_set(backend_type);
+#if defined(WITH_OPENGL_BACKEND) && defined(WIN32)
+  /* Last resort: no native driver worked, so retry OpenGL over Direct3D 12. Placed after Vulkan
+   * because a mapping layer is more limited than a backend talking to the driver directly. */
+  if (g_opengl_on_d3d_override.value_or(true)) {
+    add_attempt(GPU_BACKEND_OPENGL, true);
+  }
+#endif
+
+  for (const GPUBackendAttempt &attempt : attempts) {
+    gpu_backend_opengl_on_d3d_set(attempt.opengl_on_d3d);
+    GPU_backend_type_selection_set(attempt.type);
     if (GPU_backend_supported()) {
-      if (g_preferred_device_override.has_value() && backend_type != GPU_BACKEND_VULKAN) {
+      if (attempt.opengl_on_d3d) {
+        fprintf(stderr,
+                g_opengl_on_d3d_override.value_or(false) ?
+                    "Warning: Running the OpenGL backend on the experimental Direct3D 12 mapping "
+                    "layer. Expect reduced performance and features.\n" :
+                    "Warning: No usable OpenGL driver was found, falling back to the experimental "
+                    "Direct3D 12 mapping layer. Expect reduced performance and features.\n");
+      }
+      if (g_preferred_device_override.has_value() && attempt.type != GPU_BACKEND_VULKAN) {
         fprintf(stderr,
                 "Warning: '--gpu-device' is only supported for the Vulkan backend. "
                 "Ignoring the device override for the selected %s backend and falling back to the "
                 "stored GPU preference.\n",
-                gpu_backend_type_name(backend_type));
+                gpu_backend_type_name(attempt.type));
         g_preferred_device_override.reset();
       }
       return true;
@@ -514,6 +591,7 @@ bool GPU_backend_type_selection_detect()
     G.f |= G_FLAG_GPU_BACKEND_FALLBACK;
   }
 
+  gpu_backend_opengl_on_d3d_set(false);
   GPU_backend_type_selection_set(GPU_BACKEND_NONE);
   return false;
 }
@@ -528,7 +606,7 @@ static bool gpu_backend_supported()
   switch (g_backend_type) {
     case GPU_BACKEND_OPENGL:
 #ifdef WITH_OPENGL_BACKEND
-      return true;
+      return GLBackend::is_supported();
 #else
       return false;
 #endif

@@ -60,6 +60,20 @@ void GPU_backend_type_selection_set_override(GPUBackendType backend_type);
 bool GPU_backend_type_selection_is_overridden();
 
 /**
+ * Force the OpenGL backend on or off a Direct3D 12 mapping layer, rather than leaving it as the
+ * last resort of #GPU_backend_type_selection_detect. Windows only; ignored elsewhere.
+ *
+ * This is not a separate GPU backend. Blender still runs the OpenGL backend, against a driver
+ * that implements OpenGL on top of Direct3D 12 instead of talking to the GPU directly.
+ */
+void GPU_backend_opengl_on_d3d_set_override(bool enable);
+
+/**
+ * Whether the OpenGL backend is running on the Direct3D 12 mapping layer.
+ */
+bool GPU_backend_opengl_on_d3d_get();
+
+/**
  * Override the user-preference GPU device to use the specified GPU.
  *
  * Device selection first tries the device with this (`vendor_id`, `device_id`, `index`),

@@ -26,6 +26,12 @@
 
 #include "DNA_userdef_types.h"
 
+#include "GHOST_IContext.hh"
+#include "GHOST_ISystem.hh"
+#include "GHOST_Types.hh"
+
+#include "GPU_context.hh"
+
 #include "gpu_capabilities_private.hh"
 #include "gpu_platform_private.hh"
 
@@ -400,6 +406,26 @@ void GLBackend::platform_init()
       GPG.device_luid_node_mask = uint32_t(node_mask);
     }
   }
+}
+
+bool GLBackend::is_supported()
+{
+  GHOST_ISystem *ghost_system = GPU_backend_ghost_system_get();
+  if (ghost_system == nullptr) {
+    /* Back-end detection can run before GHOST exists (background start-up). Nothing can be
+     * probed yet, so assume OpenGL works and let a later failure report itself. */
+    return true;
+  }
+
+  GHOST_GPUSettings gpu_settings = {0};
+  gpu_settings.context_type = GHOST_kDrawingContextTypeOpenGL;
+  GHOST_IContext *context = ghost_system->createOffscreenContext(gpu_settings);
+  if (context == nullptr) {
+    CLOG_WARN(&LOG, "Unable to create an OpenGL context. The driver may be missing or too old.");
+    return false;
+  }
+  ghost_system->disposeContext(context);
+  return true;
 }
 
 void GLBackend::platform_exit()

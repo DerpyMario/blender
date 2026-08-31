@@ -1660,7 +1660,8 @@ static const char arg_handle_gpu_backend_set_doc_all[] =
     "\tForce to use a specific GPU backend. Valid options: "
     "'vulkan',  "
     "'metal',  "
-    "'opengl'.";
+    "'opengl',  "
+    "'directx' (experimental, Windows only: OpenGL over a Direct3D 12 mapping layer).";
 static const char arg_handle_gpu_backend_set_doc[] =
     "\n"
     "\tForce to use a specific GPU backend. Valid options: "
@@ -1676,6 +1677,10 @@ static const char arg_handle_gpu_backend_set_doc[] =
 #    endif
     "'vulkan'"
 #  endif
+#  if defined(WITH_OPENGL_BACKEND) && defined(WIN32)
+    ". Also accepts 'directx' (experimental), which runs the OpenGL backend on a Direct3D 12 "
+    "mapping layer for GPUs whose driver provides no usable OpenGL"
+#  endif
     ".";
 static int arg_handle_gpu_backend_set(int argc, const char **argv, void * /*data*/)
 {
@@ -1683,10 +1688,13 @@ static int arg_handle_gpu_backend_set(int argc, const char **argv, void * /*data
     fprintf(stderr, "\nError: GPU backend must follow '--gpu-backend'.\n");
     return 0;
   }
-  const char *backends_supported[3] = {nullptr};
+  const char *backends_supported[4] = {nullptr};
   int backends_supported_num = 0;
 
   GPUBackendType gpu_backend = GPU_BACKEND_NONE;
+  /* Not a backend of its own: it selects OpenGL, but on a Direct3D 12 mapping layer instead of
+   * the GPU vendor's own driver. See #GPU_backend_opengl_on_d3d_set_override. */
+  bool gpu_backend_on_d3d = false;
 
   /* NOLINTBEGIN: bugprone-assignment-in-if-condition */
   if (false) {
@@ -1695,6 +1703,12 @@ static int arg_handle_gpu_backend_set(int argc, const char **argv, void * /*data
 #  ifdef WITH_OPENGL_BACKEND
   else if (STREQ(argv[1], (backends_supported[backends_supported_num++] = "opengl"))) {
     gpu_backend = GPU_BACKEND_OPENGL;
+  }
+#  endif
+#  if defined(WITH_OPENGL_BACKEND) && defined(WIN32)
+  else if (STREQ(argv[1], (backends_supported[backends_supported_num++] = "directx"))) {
+    gpu_backend = GPU_BACKEND_OPENGL;
+    gpu_backend_on_d3d = true;
   }
 #  endif
 #  ifdef WITH_VULKAN_BACKEND
@@ -1718,6 +1732,11 @@ static int arg_handle_gpu_backend_set(int argc, const char **argv, void * /*data
   /* NOLINTEND: bugprone-assignment-in-if-condition */
 
   GPU_backend_type_selection_set_override(gpu_backend);
+#  if defined(WITH_OPENGL_BACKEND) && defined(WIN32)
+  GPU_backend_opengl_on_d3d_set_override(gpu_backend_on_d3d);
+#  else
+  UNUSED_VARS(gpu_backend_on_d3d);
+#  endif
 
   return 1;
 }

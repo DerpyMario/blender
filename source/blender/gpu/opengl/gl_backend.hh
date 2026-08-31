@@ -225,6 +225,15 @@ class GLBackend : public GPUBackend {
   bool debug_capture_begin(const char *title);
   void debug_capture_end();
 
+  /**
+   * Whether an OpenGL context can actually be created on this machine.
+   *
+   * Compiling the backend in says nothing about whether the installed driver works, so this
+   * probes by creating and destroying an off-screen context. Used by the start-up back-end
+   * fall-back chain, which otherwise picks OpenGL and then fails with no way back.
+   */
+  static bool is_supported();
+
  private:
   static void platform_init();
   static void platform_exit();
